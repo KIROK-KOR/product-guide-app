@@ -6,6 +6,7 @@ from typing import List, Dict, Optional
 
 import pandas as pd
 import streamlit as st
+import base64
 
 # 선택 기능(카메라 인식) 의존성: 설치되지 않아도 앱은 구동되도록 처리
 try:
@@ -186,29 +187,6 @@ def camera_barcode_reader() -> Optional[str]:
 # 앱 시작
 # ======================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
-
-
-# === Mobile-only UI tweaks injected by assistant ===
-CUSTOM_CSS = """
-<style>
-/* Desktop base */
-.block-container {max-width: 1200px !important; padding-top: 1rem;}
-footer {visibility: hidden;}
-.stButton>button, .stDownloadButton>button {height: 44px; border-radius: 12px;}
-[data-testid="stTextInput"] input {height: 44px; border-radius: 10px;}
-
-/* Mobile tweaks (<= 640px) */
-@media (max-width: 640px) {
-  .block-container { padding-left: .75rem; padding-right: .75rem; }
-  .stButton>button, .stDownloadButton>button { height: 48px; font-size: 1rem; }
-  [data-testid="stTextInput"] input { height: 48px; font-size: 1rem; }
-  [data-baseweb="radio"] label { font-size: .95rem; }
-  .stDataFrame [role="table"] { font-size: .9rem; }
-}
-</style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-# === End of mobile tweaks ===
 st.title(APP_TITLE)
 st.caption("엑셀 데이터만을 신뢰소스로 활용하여 제품 정보를 조회합니다.")
 
