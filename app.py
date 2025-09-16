@@ -1,69 +1,69 @@
+# -*- coding: utf-8 -*-
 import io
 import re
 import time
 from datetime import datetime
 from typing import List, Dict, Optional
 
+import base64
 import pandas as pd
 import streamlit as st
-import base64
 
-# 선택 기능(카메라 인식) 의존성: 설치되지 않아도 앱은 구동되도록 처리
+# -----------------------------
+# 선택 의존성 (설치 안되어도 앱이 죽지 않게)
+# -----------------------------
+try:
+    from PIL import Image
+except Exception:
+    Image = None
+
 try:
     from pyzbar.pyzbar import decode as zbar_decode
-    from PIL import Image
     PYZBAR_AVAILABLE = True
 except Exception:
     PYZBAR_AVAILABLE = False
 
-APP_TITLE = "제품 설명 가이드 앱"
-REQUIRED_COLS = [
-    "바코드", "SAP코드", "제품명", "입수",
-    "출고가", "포함가(면세 시 제외)", "면세/과세 구분", "PLT 박스수"
-]
+# [추가] 실시간(WebRTC)용 선택 의존성
+try:
+    import cv2
+    import av
+    import numpy as np
+    from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+    WEBRTC_AVAILABLE = True
+except Exception:
+    WEBRTC_AVAILABLE = False
 
-# ---------------------
-# 유틸: 문자열 정규화
-# ---------------------
-def normalize_barcode(x: object) -> str:
-    """
-    바코드를 비교 가능한 숫자문자열로 통일.
-    - 숫자만 추출
-    - 선행 0 보존 로직: 원본이 문자열이면 그대로 숫자만 유지, 숫자형이면 정수 변환 뒤 문자열
-    """
-    if pd.isna(x):
-        return ""
-    s = str(x).strip()
-    # 하이픈/공백 제거 후 숫자만 남김
-    s_digits = "".join(ch for ch in s if ch.isdigit())
-    return s_digits
+# -----------------------------
+# 앱 기본 설정
+# -----------------------------
+st.set_page_config(page_title="제품 설명 가이드", layout="wide")
 
-def normalize_name(x: object) -> str:
-    if pd.isna(x):
-        return ""
-    return re.sub(r"\s+", " ", str(x).strip()).lower()
+REQUIRED_COLS = ["바코드", "SAP코드", "제품명", "입수", "출고가", "포함가(면세 시 제외)", "면세/과세 구분", "PLT 박스수"]
 
-# ---------------------
-# 데이터 적재 & 검증
-# ---------------------
-@st.cache_data(show_spinner=False)
-def load_excel(file_bytes: bytes) -> pd.DataFrame:
-    df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
-    # 컬럼 존재 검증
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:
-        raise ValueError(f"엑셀에 필수 컬럼이 없습니다: {missing}\n"
-                         f"필수 컬럼: {REQUIRED_COLS}")
-    # 타입/정규화 보조 컬럼
-    df["__바코드_norm__"] = df["바코드"].apply(normalize_barcode)
-    df["__제품명_norm__"] = df["제품명"].apply(normalize_name)
-    return df
+def normalize_barcode(x: str) -> str:
+    if not isinstance(x, str):
+        x = str(x) if x is not None else ""
+    return re.sub(r"[^0-9]", "", x).strip()
+
+def normalize_name(x: str) -> str:
+    if not isinstance(x, str):
+        x = str(x) if x is not None else ""
+    return re.sub(r"\s+", "", x).strip().lower()
+
+def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
+    # 필요한 컬럼 없으면 최대한 맞춰줌(없는 건 빈값)
+    for c in REQUIRED_COLS:
+        if c not in df.columns:
+            df[c] = ""
+    # 검색용 정규화 컬럼
+    df["__바코드_norm__"] = df["바코드"].astype(str).map(normalize_barcode)
+    df["__제품명_norm__"] = df["제품명"].astype(str).map(normalize_name)
+    return df[REQUIRED_COLS + ["__바코드_norm__", "__제품명_norm__"]]
 
 def filter_by_barcode(df: pd.DataFrame, query: str) -> pd.DataFrame:
     q = normalize_barcode(query)
     if not q:
         return df.iloc[0:0]
-    # 완전일치 우선, 없으면 부분일치
     exact = df[df["__바코드_norm__"] == q]
     if len(exact) > 0:
         return exact
@@ -73,202 +73,201 @@ def filter_by_name(df: pd.DataFrame, query: str) -> pd.DataFrame:
     q = normalize_name(query)
     if not q:
         return df.iloc[0:0]
-    # 부분일치 우선
-    hit = df[df["__제품명_norm__"].str.contains(q, na=False)]
-    return hit
+    # 부분일치
+    return df[df["__제품명_norm__"].str.contains(q, na=False)]
 
-def result_view(df_hit: pd.DataFrame):
-    # 필수 컬럼만 노출
-    view_cols = REQUIRED_COLS
-    if len(df_hit) == 0:
-        st.info("검색 결과가 없습니다. 입력값을 확인해주세요.")
+def result_view(df: pd.DataFrame):
+    if df is None or len(df) == 0:
+        st.info("검색 결과가 없습니다.")
         return
+    # 카드 느낌의 상단 1건
+    top = df.iloc[0]
+    st.markdown(
+        f"""
+        **제품명**: {top['제품명']}  
+        **바코드**: {top['바코드']}  |  **SAP코드**: {top['SAP코드']}  
+        **입수**: {top['입수']}  |  **출고가**: {top['출고가']}  |  **포함가(면세 시 제외)**: {top['포함가(면세 시 제외)']}  
+        **면세/과세**: {top['면세/과세 구분']}  |  **PLT 박스수**: {top['PLT 박스수']}
+        """.strip()
+    )
+    with st.expander("표로 보기", expanded=False):
+        st.dataframe(df[REQUIRED_COLS], use_container_width=True)
 
-    if len(df_hit) == 1:
-        row = df_hit.iloc[0].to_dict()
-        with st.container(border=True):
-            st.markdown(f"### {row['제품명']}")
-            c1, c2, c3 = st.columns([1,1,1])
-            with c1:
-                st.metric("바코드", str(row["바코드"]))
-                st.metric("SAP코드", str(row["SAP코드"]))
-                st.metric("입수", str(row["입수"]))
-            with c2:
-                st.metric("출고가", f"{int(row['출고가']):,} 원")
-                st.metric("포함가(면세 시 제외)", f"{int(row['포함가(면세 시 제외)']):,} 원")
-                st.metric("면세/과세 구분", str(row["면세/과세 구분"]))
-            with c3:
-                st.metric("PLT 박스수", str(row["PLT 박스수"]))
-    else:
-        st.caption(f"총 {len(df_hit)}건이 검색되었습니다.")
-        st.dataframe(df_hit[view_cols].reset_index(drop=True), use_container_width=True)
+# -----------------------------
+# 히스토리 관리
+# -----------------------------
+if "history" not in st.session_state:
+    st.session_state["history"] = []
+if "df" not in st.session_state:
+    st.session_state["df"] = None
+if "last_result" not in st.session_state:
+    st.session_state["last_result"] = None
 
-def push_history(query_type: str, query_value: str, df_hit: pd.DataFrame):
-    if "history" not in st.session_state:
-        st.session_state["history"] = []
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    item = {
-        "시간": stamp,
-        "검색유형": query_type,
-        "입력값": query_value,
-        "결과건수": int(len(df_hit)),
-        "대표제품": (df_hit.iloc[0]["제품명"] if len(df_hit) > 0 else "")
-    }
-    st.session_state["history"].append(item)
+def push_history(kind: str, query: str, hit_df: pd.DataFrame):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state["history"].insert(0, {"시각": ts, "종류": kind, "검색어": query, "건수": len(hit_df or [])})
+    st.session_state["last_result"] = hit_df.copy() if hit_df is not None else None
 
 def show_history():
-    st.subheader("조회 이력")
-    hist = st.session_state.get("history", [])
-    if not hist:
-        st.caption("아직 조회 이력이 없습니다.")
+    if len(st.session_state["history"]) == 0:
+        st.info("검색 기록이 없습니다.")
         return
-    st.dataframe(pd.DataFrame(hist), use_container_width=True)
-    if st.button("이력 초기화", type="secondary"):
-        st.session_state["history"] = []
-        st.rerun()
+    st.dataframe(pd.DataFrame(st.session_state["history"]), use_container_width=True)
 
-def template_download_button():
-    # 런타임에서 샘플 템플릿 생성
-    sample = pd.DataFrame([
-        {
-            "바코드": "0881234567890",
-            "SAP코드": "SAP100001",
-            "제품명": "오뚜기 진라면 매운맛 120g",
-            "입수": 40, "출고가": 42000, "포함가(면세 시 제외)": 46200,
-            "면세/과세 구분": "과세", "PLT 박스수": 48
-        }
-    ])
-    bio = io.BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as w:
-        sample.to_excel(w, index=False, sheet_name="제품정보")
-    st.download_button(
-        "샘플 템플릿(.xlsx) 다운로드",
-        data=bio.getvalue(),
-        file_name="products_template_min.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        help="필수 컬럼 형식을 참고하세요.",
-        type="secondary",
-        use_container_width=True
-    )
+# -----------------------------
+# 파일 업로드/로드
+# -----------------------------
+st.sidebar.header("데이터 업로드")
+up = st.sidebar.file_uploader("EXCEL 파일 업로드 (.xlsx)", type=["xlsx"], accept_multiple_files=False)
+if up is not None:
+    try:
+        df = pd.read_excel(up)
+        st.session_state["df"] = prepare_df(df)
+        st.sidebar.success(f"업로드 완료: {len(st.session_state['df'])}개 제품")
+    except Exception as e:
+        st.sidebar.error(f"엑셀 읽기 실패: {e}")
 
-def camera_barcode_reader() -> Optional[str]:
-    """
-    선택 기능: 카메라로 바코드 촬영 → pyzbar로 해석.
-    pyzbar 미설치 시 None 반환 + 안내.
-    """
-    if not PYZBAR_AVAILABLE:
-        st.warning("카메라 인식 기능은 선택 기능입니다. 사용하려면 'pyzbar'를 설치하세요.\n\n"
-                   "설치(Windows):\n"
-                   "1) 관리자 PowerShell로 `choco install zbar`(Chocolatey 필요)\n"
-                   "2) `pip install pyzbar`\n"
-                   "※ 미설치여도 본 앱의 검색 기능은 정상 동작합니다.")
-        return None
+if st.session_state["df"] is None:
+    st.warning("먼저 좌측에서 EXCEL 파일을 업로드하세요. (필수 컬럼: " + ", ".join(REQUIRED_COLS) + ")")
 
-    st.caption("스마트폰으로 접속한 경우에도 브라우저 카메라 접근 허용 후 촬영하세요.")
-    img = st.camera_input("바코드가 잘 보이도록 촬영 후 [찍기]를 눌러주세요.")
-    if img is None:
-        return None
-
-    # 이미지 → 바코드 디코드
-    bytes_data = img.getvalue()
-    pil = Image.open(io.BytesIO(bytes_data))
-    results = zbar_decode(pil)
-    candidates = [r.data.decode("utf-8") for r in results]
-    if not candidates:
-        st.info("바코드를 인식하지 못했습니다. 각도를 바꾸거나 초점을 맞춰 다시 시도해주세요.")
-        return None
-
-    # 숫자만 추출(하이픈/공백 제거)
-    decoded = normalize_barcode(candidates[0])
-    st.success(f"인식된 바코드: {decoded}")
-    return decoded
-
-# ======================
-# 앱 시작
-# ======================
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.title(APP_TITLE)
-st.caption("엑셀 데이터만을 신뢰소스로 활용하여 제품 정보를 조회합니다.")
-
-with st.sidebar:
-    st.header("1) 엑셀 업로드")
-    file = st.file_uploader(
-        "제품정보 엑셀 업로드 (.xlsx)",
-        type=["xlsx", "xlsm"],
-        accept_multiple_files=False,
-        help="드래그앤드롭 또는 클릭하여 선택",
-    )
-    template_download_button()
-
-    if file:
-        try:
-            df = load_excel(file.getvalue())
-            st.session_state["df"] = df
-            st.success(f"업로드 완료: {file.name} · 행 {len(df)}건")
-            st.caption("필수 컬럼: " + ", ".join(REQUIRED_COLS))
-        except Exception as e:
-            st.error(f"엑셀 읽기 오류: {e}")
-    else:
-        st.info("엑셀을 업로드하면 검색이 가능합니다.")
-        st.session_state["df"] = None
-
-st.divider()
-
-# 탭: 검색 / 이력 / (선택) 카메라 바코드
-tab_search, tab_history, tab_camera = st.tabs(["🔍 검색", "🕘 조회 이력", "📷 카메라 바코드(선택)"])
+# -----------------------------
+# 페이지 본문 탭
+# -----------------------------
+tab_search, tab_history, tab_camera = st.tabs(["🔎 검색", "🕘 히스토리", "📷 카메라 스캔(사진)"])
 
 with tab_search:
-    st.subheader("2) 검색 입력")
-    colA, colB = st.columns([1,3])
-    with colA:
-        mode = st.radio("검색 기준", ["바코드", "제품명"], horizontal=True)
-    with colB:
-        placeholder = "숫자/하이픈 허용" if mode == "바코드" else "제품명 2자 이상"
-        query = st.text_input("검색어", "", placeholder=placeholder)
+    st.subheader("1) 검색")
+    mode = st.radio("검색 기준", ["바코드", "제품명"], horizontal=True)
+    query = st.text_input("검색어 입력", placeholder="바코드(숫자/하이픈) 또는 제품명(2자 이상)")
+    colA, colB = st.columns([1, 1])
+    do = colA.button("검색", type="primary")
+    reset = colB.button("초기화")
 
-    c1, c2, c3 = st.columns([1,1,6])
-    with c1:
-        do_search = st.button("검색", type="primary", use_container_width=True)
-    with c2:
-        do_reset = st.button("초기화", type="secondary", use_container_width=True)
+    if reset:
+        query = ""
+        st.experimental_rerun()
 
-    if do_reset:
-        st.session_state.pop("last_result", None)
-        st.rerun()
-
-    df = st.session_state.get("df")
-    if do_search:
-        if df is None:
-            st.warning("엑셀을 먼저 업로드해주세요.")
+    hit_df = None
+    if do and st.session_state.get("df") is not None:
+        if mode == "바코드":
+            hit_df = filter_by_barcode(st.session_state["df"], query)
+            push_history("바코드", query, hit_df)
         else:
-            if mode == "바코드":
-                if not re.fullmatch(r"[0-9\-\s]+", query or ""):
-                    st.error("바코드는 숫자/하이픈만 입력 가능합니다.")
-                else:
-                    hit = filter_by_barcode(df, query)
-                    push_history("바코드", query, hit)
-                    st.session_state["last_result"] = hit
-            else:
-                if not query or len(query.strip()) < 2:
-                    st.error("제품명은 2자 이상 입력해주세요.")
-                else:
-                    hit = filter_by_name(df, query)
-                    push_history("제품명", query, hit)
-                    st.session_state["last_result"] = hit
+            hit_df = filter_by_name(st.session_state["df"], query)
+            push_history("제품명", query, hit_df)
 
-    # 결과 표시
-    hit_df = st.session_state.get("last_result", pd.DataFrame(columns=REQUIRED_COLS))
-    st.subheader("3) 검색 결과")
-    result_view(hit_df)
+    st.subheader("2) 결과")
+    if hit_df is not None:
+        result_view(hit_df)
+    else:
+        hit_df2 = st.session_state.get("last_result", pd.DataFrame(columns=REQUIRED_COLS))
+        result_view(hit_df2)
 
 with tab_history:
     show_history()
 
 with tab_camera:
-    st.subheader("카메라로 바코드 인식 (선택 기능)")
-    decoded = camera_barcode_reader()
-    if decoded and st.session_state.get("df") is not None:
-        st.info("인식된 바코드로 즉시 검색합니다.")
-        hit = filter_by_barcode(st.session_state["df"], decoded)
-        push_history("바코드(카메라)", decoded, hit)
-        result_view(hit)
+    st.subheader("카메라로 바코드 인식 (사진 캡처)")
+    if not PYZBAR_AVAILABLE or Image is None:
+        st.warning(
+            "선택 기능입니다. 사진 캡처 인식을 사용하려면:\n"
+            "- pip install pyzbar Pillow\n"
+            "- (Windows는 보통 추가 설치 불필요, 드물게 zbar DLL 필요)\n"
+            "※ 미설치여도 본 앱의 검색 기능은 정상 동작합니다."
+        )
+    else:
+        img_file = st.camera_input("바코드가 잘 보이도록 촬영 후 [찍기]를 눌러주세요.")
+        if img_file is not None:
+            pil = Image.open(img_file)
+            results = zbar_decode(pil)
+            if not results:
+                st.info("바코드를 인식하지 못했습니다. 각도/거리/초점을 바꿔 다시 시도해보세요.")
+            else:
+                # 여러 후보 중 숫자만 추출 후 가장 긴 것
+                cands = []
+                for r in results:
+                    val = "".join(ch for ch in r.data.decode("utf-8", errors="ignore") if ch.isdigit())
+                    if val:
+                        cands.append(val)
+                if cands:
+                    cands.sort(key=len, reverse=True)
+                    decoded = cands[0]
+                    st.success(f"인식된 바코드: **{decoded}**")
+                    if st.session_state.get("df") is not None:
+                        hit = filter_by_barcode(st.session_state["df"], decoded)
+                        push_history("바코드(카메라)", decoded, hit)
+                        result_view(hit)
+
+# ============================================================
+# [추가] 실시간(WebRTC) 스캔 탭
+# ============================================================
+st.markdown("---")
+st.subheader("⚡ 실시간 바코드 스캔 (베타)")
+
+if not WEBRTC_AVAILABLE:
+    st.warning(
+        "실시간 스캔은 선택 기능입니다.\n\n"
+        "아래 패키지를 설치한 뒤 다시 실행하세요:\n"
+        "    pip install streamlit-webrtc opencv-python-headless av numpy\n"
+        "또는 opencv-python(전체판)을 사용해도 됩니다.\n\n"
+        "iOS Safari는 HTTPS(또는 localhost)에서만 카메라 허용됩니다."
+    )
+else:
+    class BarcodeTransformer(VideoTransformerBase):
+        def __init__(self):
+            self.last_texts: List[str] = []
+
+        def transform(self, frame: "av.VideoFrame"):
+            img = frame.to_ndarray(format="bgr24")
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+            # 성능을 위한 다운스케일
+            h, w = gray.shape[:2]
+            max_side = max(h, w)
+            scale = 720 / max_side if max_side > 720 else 1.0
+            if scale < 1.0:
+                small = cv2.resize(gray, (int(w * scale), int(h * scale)))
+            else:
+                small = gray
+
+            decoded_texts = []
+            if PYZBAR_AVAILABLE and Image is not None:
+                pil = Image.fromarray(small)
+                results = zbar_decode(pil)
+                for r in results:
+                    x, y, ww, hh = r.rect
+                    if scale < 1.0:
+                        x, y, ww, hh = int(x / scale), int(y / scale), int(ww / scale), int(hh / scale)
+                    cv2.rectangle(img, (x, y), (x + ww, y + hh), (0, 255, 0), 2)
+                    txt = r.data.decode("utf-8", errors="ignore")
+                    decoded_texts.append(txt)
+                    cv2.putText(img, txt, (x, max(0, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+            if decoded_texts:
+                for t in decoded_texts:
+                    if t not in self.last_texts:
+                        self.last_texts.insert(0, t)
+                self.last_texts = self.last_texts[:5]
+
+            cv2.putText(img, "Align barcode in view. Lighting matters.",
+                        (10, img.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            return img
+
+    ctx = webrtc_streamer(
+        key="barcode-live",
+        video_transformer_factory=BarcodeTransformer,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
+
+    if ctx and ctx.video_transformer:
+        latest = ctx.video_transformer.last_texts[:3]
+        if latest:
+            st.success("실시간 인식(최신순): " + " | ".join(f"**{t}**" for t in latest))
+            if st.session_state.get("df") is not None:
+                # 가장 최신값으로 즉시 조회
+                hit = filter_by_barcode(st.session_state["df"], latest[0])
+                push_history("바코드(실시간)", latest[0], hit)
+                result_view(hit)
+        else:
+            st.info("바코드가 감지되면 여기에 표시됩니다.")
